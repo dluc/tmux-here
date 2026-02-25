@@ -1,6 +1,8 @@
 # tmux-here
 
-Create or attach to a tmux session named after your current directory.
+Two small tmux utilities. No config, no dependencies beyond tmux and bash.
+
+**tmux-here** — create or attach to a session named after your current directory:
 
 ```
 cd ~/projects/my-app
@@ -8,7 +10,12 @@ tmux-here
 # → tmux session: "projects__my-app"
 ```
 
-That's the whole idea. One command, no config, no dependencies beyond tmux and bash.
+**tmux-continue** — pick an existing session from a numbered menu and attach:
+
+```
+tmux-continue
+# → lists all sessions, you pick one
+```
 
 ## Why this exists
 
@@ -35,10 +42,12 @@ It's ~120 lines because error handling is 90% of the work.
 ## Install
 
 ```bash
-# Copy the script somewhere in your PATH
-curl -fsSL https://raw.githubusercontent.com/dluc/tmux-here/main/tmux-here \
-    -o ~/.local/bin/tmux-here
-chmod +x ~/.local/bin/tmux-here
+# Copy the scripts somewhere in your PATH
+for script in tmux-here tmux-continue; do
+    curl -fsSL "https://raw.githubusercontent.com/dluc/tmux-here/main/$script" \
+        -o ~/.local/bin/"$script"
+    chmod +x ~/.local/bin/"$script"
+done
 ```
 
 Or clone and symlink:
@@ -46,6 +55,7 @@ Or clone and symlink:
 ```bash
 git clone https://github.com/dluc/tmux-here.git
 ln -s "$(pwd)/tmux-here/tmux-here" ~/.local/bin/tmux-here
+ln -s "$(pwd)/tmux-here/tmux-continue" ~/.local/bin/tmux-continue
 ```
 
 ### Requirements
@@ -106,6 +116,43 @@ nested session. The script detects `$TMUX` and refuses, with `-f` to override.
 **No stderr suppression.** tmux's own error messages (bad config, wrong `$TERM`,
 socket errors) are passed through to the user, not swallowed.
 
+## tmux-continue
+
+An interactive session picker. Lists every running tmux session in a numbered
+menu and attaches to the one you choose.
+
+```bash
+tmux-continue            # show menu, pick a session
+tmux-continue -f         # allow picking from inside tmux (nested attach)
+tmux-continue --help     # usage info
+```
+
+### What it shows
+
+```
+3 tmux sessions found:
+
+ 1) api-server           2 windows (created Mon Feb 24 09:14:01 2026)
+ 2) dotfiles             1 windows (created Mon Feb 24 11:30:45 2026)
+ 3) projects__my-app     3 windows (created Tue Feb 25 08:02:12 2026)
+
+Select session [1-3] (q to quit):
+```
+
+Session names are left-aligned and the detail column adjusts to the longest
+name, so the output stays readable regardless of naming conventions.
+
+### Safety
+
+Same philosophy as tmux-here:
+
+- **Nested session detection.** Refuses when `$TMUX` is set, with `-f` to override.
+- **EOF handling.** Ctrl-D exits cleanly instead of looping.
+- **Non-interactive guard.** Refuses when stdin is not a terminal (piped input),
+  with a hint to use `tmux attach -t` directly.
+- **Input validation.** Rejects non-numeric input and out-of-range numbers.
+  Leading zeros are normalized to prevent octal interpretation in bash arithmetic.
+
 ## Limitations
 
 - **Session name collisions.** Two directories that differ only after 128 characters
@@ -116,9 +163,9 @@ socket errors) are passed through to the user, not swallowed.
   symlinks get different session names. This is arguably correct (you chose the path)
   but worth knowing.
 
-- **No project picker.** This is deliberately a "session for the directory I'm
-  already in" tool, not a "pick a project and switch" tool. See Alternatives below
-  if you want fuzzy finding.
+- **No project picker.** tmux-here is deliberately a "session for the directory
+  I'm already in" tool, not a session picker. tmux-continue covers the "which
+  session do I reconnect to?" case. For fuzzy project finding, see Alternatives.
 
 - **No layout management.** tmux-here creates a single-window session. It doesn't
   define pane layouts, run startup commands, or restore previous window arrangements.
