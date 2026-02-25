@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# tmux-continue — interactive menu to list and attach to tmux sessions
+#
+# Usage: tmux-continue [-f|--force] [-h|--help]
+#
+# Lists all existing tmux sessions in a numbered menu and prompts the user
+# to pick one to attach to.  Useful when you have several long-running
+# sessions and want a quick picker instead of remembering exact names.
+#
+# Options:
+#   -f, --force   Allow attaching from inside an existing tmux session
+#                 (nested attach).  Without this flag the script will
+#                 refuse to run when $TMUX is already set.
+#   -h, --help    Show this help text and exit.
+#
+# Compatible with: bash 3.2+, macOS, Linux, WSL
+
+# NOT -e (we handle exits ourselves); -u catches typos in variable names.
+set -u
+
+# ---------------------------------------------------------------------------
+# Colours (respected: NO_COLOR, non-interactive pipes)
+# ---------------------------------------------------------------------------
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    CYAN=$'\033[0;36m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    RED=$'\033[0;31m'
+    RESET=$'\033[0m'
+else
+    BOLD='' DIM='' CYAN='' GREEN='' YELLOW='' RED='' RESET=''
+fi
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+die() {
+    printf '%stmux-continue: error:%s %s\n' "$RED" "$RESET" "$1" >&2
+    if [ -n "${2:-}" ]; then
+        printf '       %sFix:%s %s\n' "$YELLOW" "$RESET" "$2" >&2
+    fi
+    exit 1
+}
+
+warn() { printf '%stmux-continue:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+info() { printf '%stmux-continue:%s %s\n' "$CYAN" "$RESET" "$*"; }
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+force_nest=false
+
+for arg in "$@"; do
+    case "$arg" in
+        -f|--force) force_nest=true ;;
+        -h|--help)
+            printf '%sUsage:%s tmux-continue [-f|--force] [-h|--help]\n\n' \
+                   "$BOLD" "$RESET"
+            printf '  List tmux sessions and attach to the one you pick.\n\n'
+            printf '  %s-f, --force%s   Allow nested attach (inside tmux)\n' \
+                   "$BOLD" "$RESET"
+            printf '  %s-h, --help%s    Show this help\n' "$BOLD" "$RESET"
+            exit 0
+            ;;
+        *)  die "unknown argument: $arg" "Try 'tmux-continue --help'" ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Preflight checks
+# ---------------------------------------------------------------------------
+
+# 1. tmux must be installed
+command -v tmux >/dev/null 2>&1 \
+    || die "tmux is not installed" \
+           "Install it with: sudo apt install tmux  (or brew install tmux)"
+
+# 2. Guard against nesting (unless --force)
+if [ -n "${TMUX:-}" ] && [ "$force_nest" = false ]; then
+    die "already inside a tmux session" \
+        "Detach first (Ctrl-b d), or re-run with --force to nest"
+fi
+
+# 3. tmux server must be running with at least one session
+#    "tmux ls" exits non-zero when no server is running.
+session_list="$(tmux ls 2>/dev/null)" || true
+
+if [ -z "$session_list" ]; then
+    die "no tmux sessions found" \
+        "Start one with: tmux new -s <name>  (or use tmux-here)"
+fi
+
+# ---------------------------------------------------------------------------
+# Build & display menu
+# ---------------------------------------------------------------------------
+
+# Read session lines into an array (bash 3.2+ compatible).
+sessions=()
+while IFS= read -r line; do
+    sessions+=("$line")
+done <<< "$session_list"
+
+count=${#sessions[@]}
+
+printf '\n%s%s tmux session%s found:%s\n\n' \
+       "$BOLD" "$count" "$([ "$count" -ne 1 ] && echo 's' || true)" "$RESET"
+
+# Find the longest session name so we can align the detail column.
+max_name=0
+for entry in "${sessions[@]}"; do
+    name="${entry%%:*}"
+    len=${#name}
+    [ "$len" -gt "$max_name" ] && max_name=$len
+done
+
+idx=1
+for entry in "${sessions[@]}"; do
+    # Session name is everything before the first colon.
+    name="${entry%%:*}"
+    detail="${entry#*: }"
+
+    printf ' %s%d)%s %s%-*s%s %s%s%s\n' \
+           "$GREEN" "$idx" "$RESET" \
+           "$BOLD" "$max_name" "$name" "$RESET" \
+           "$DIM" "$detail" "$RESET"
+    idx=$((idx + 1))
+done
+
+printf '\n'
+
+# ---------------------------------------------------------------------------
+# Prompt for selection
+# ---------------------------------------------------------------------------
+
+# Must be an interactive terminal to prompt.
+if ! [ -t 0 ]; then
+    die "stdin is not a terminal — cannot prompt for selection" \
+        "Run tmux-continue interactively, or use: tmux attach -t <name>"
+fi
+
+while true; do
+    printf '%sSelect session [1-%d] (q to quit):%s ' "$CYAN" "$count" "$RESET"
+    read -r choice || { printf '\n'; info "cancelled"; exit 0; }
+
+    # Quit
+    case "${choice:-}" in
+        q|Q|quit|exit) info "cancelled"; exit 0 ;;
+    esac
+
+    # Validate: must be a number in range.
+    if ! printf '%s' "$choice" | grep -qE '^[0-9]+$'; then
+        warn "please enter a number between 1 and $count"
+        continue
+    fi
+
+    # Force base-10 so leading zeros aren't misread as octal in $(( )).
+    choice=$((10#$choice))
+
+    if [ "$choice" -lt 1 ] || [ "$choice" -gt "$count" ]; then
+        warn "out of range — pick between 1 and $count"
+        continue
+    fi
+
+    break
+done
+
+# ---------------------------------------------------------------------------
+# Attach
+# ---------------------------------------------------------------------------
+
+selected="${sessions[$((choice - 1))]}"
+target="${selected%%:*}"
+
+info "attaching to ${BOLD}${target}${RESET}"
+exec tmux attach-session -t "$target"
