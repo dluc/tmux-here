@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# zell-here — create or attach to a zellij session named after the current directory.
+#
+# Portable: bash 3.2+, Linux, macOS, WSL.
+# Safe: a zellij crash or sudden exit never kills the hosting shell.
+# Honest: real errors are reported, not swallowed.
+# ---------------------------------------------------------------------------
+
+set -u   # strict variables; NOT -e (we handle exits ourselves)
+
+# -- source guard -----------------------------------------------------------
+# If someone does `source zell-here`, every `exit` would kill their shell.
+# Detect this and refuse early.  Works in bash; zsh sets $0 differently but
+# also won't match BASH_SOURCE, so the guard is safe in both.
+
+if [[ -n "${BASH_SOURCE:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
+    printf 'zell-here: error: this script must be executed, not sourced\n' >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+# -- helpers ----------------------------------------------------------------
+
+die()  { printf 'zell-here: error: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'zell-here: %s\n' "$*" >&2; }
+info() { printf 'zell-here: %s\n' "$*"; }
+
+# Restore terminal sanity after a crash.  Zellij does its own virtual
+# terminal emulation so corruption is rarer than with tmux, but a hard
+# crash (SIGKILL, OOM) can still leave the outer terminal in a bad state.
+# These are safe no-ops on a healthy terminal.
+restore_terminal() {
+    stty sane 2>/dev/null            # re-enable echo, line editing, etc.
+    printf '\033[?1049l' 2>/dev/null # exit alternate screen buffer
+    printf '\033[?25h'   2>/dev/null # show cursor in case it was hidden
+}
+
+# -- argument handling ------------------------------------------------------
+
+force_nest=false
+for arg in "$@"; do
+    case "$arg" in
+        -f|--force) force_nest=true ;;
+        -h|--help)
+            printf 'Usage: zell-here [-f|--force]\n'
+            printf '  Creates or attaches to a zellij session named after $PWD.\n'
+            printf '  -f, --force   Allow nesting inside an existing zellij session.\n'
+            exit 0
+            ;;
+        *)  die "unknown argument: $arg (try 'zell-here --help')" ;;
+    esac
+done
+
+# -- preflight --------------------------------------------------------------
+
+command -v zellij >/dev/null 2>&1 \
+    || die "zellij is not installed or not in PATH"
+
+# Detect nested zellij.  Zellij sets $ZELLIJ (to "0") inside every pane.
+if [[ -n "${ZELLIJ:-}" ]] && ! $force_nest; then
+    die "already inside zellij (session: ${ZELLIJ_SESSION_NAME:-unknown}). Use 'zell-here -f' to force."
+fi
+
+# -- derive session name from cwd ------------------------------------------
+# Rules:
+#   1. Strip leading /
+#   2. Replace every non-safe character with "_"
+#   3. Truncate to 35 chars
+#      Zellij uses per-session Unix sockets, so the name is constrained by
+#      the socket path limit (~108 bytes total).  There is also a known
+#      protobuf bug (zellij-org/zellij#4627) that hangs on names >36 chars.
+#      35 is safe for both limits.
+#   4. cwd = "/" produces empty string -> fall back to "root"
+
+raw_path="$(pwd)" || die "cannot determine working directory"
+
+session_name="${raw_path#/}"
+
+# Bash 3.2+ supports [^...] in parameter expansion globs, but verify at
+# runtime rather than trusting the manual.  Fall back to tr if it fails.
+_glob_test="a/b"
+if [[ "${_glob_test//[^ab]/_}" == "a_b" ]]; then
+    session_name="${session_name//[^a-zA-Z0-9_-]/_}"
+else
+    # Fallback: tr handles single-char replacement reliably everywhere.
+    session_name="$(printf '%s' "$session_name" | tr -c 'a-zA-Z0-9_-' '_')"
+fi
+
+session_name="${session_name:0:35}"
+[[ -n "$session_name" ]] || session_name="root"
+
+info "session: $session_name"
+
+# -- launch zellij with crash isolation -------------------------------------
+#
+# Why trap HUP/PIPE:
+#   If the zellij process is killed (kill -9, OOM, segfault) the hosting
+#   terminal may receive SIGHUP / SIGPIPE.  Without traps those signals
+#   propagate to the shell that launched the script — especially dangerous
+#   when invoked from a shell function or alias chain.
+#
+# Why NOT trap TERM/INT:
+#   The user must be able to Ctrl-C out if zellij hangs.
+#
+# Why we do NOT redirect stderr:
+#   zellij prints its own diagnostics (config errors, socket issues).
+#   Swallowing them leaves the user blind.  Let zellij speak for itself.
+
+trap '' HUP PIPE
+
+# zellij attach --create: attach if the session exists, create it otherwise.
+# This is the direct equivalent of tmux's `new-session -As`.
+zellij attach --create "$session_name"
+rc=$?
+
+trap - HUP PIPE    # restore defaults immediately
+
+# -- post-exit terminal recovery -------------------------------------------
+#
+# Zellij does in-process terminal emulation, so the outer terminal is less
+# likely to be corrupted than with tmux.  But a hard crash (SIGKILL, OOM)
+# can still leave things broken.  restore_terminal is a safe no-op on a
+# healthy terminal.
+
+if (( rc != 0 )); then
+    restore_terminal
+fi
+
+# -- report outcome ---------------------------------------------------------
+#
+# Zellij does not formally document exit codes.  Observed behavior:
+#   0   — clean exit: session ended OR user detached
+#   1   — generic error (bad args, socket failure, session conflict, ...)
+#  >128 — killed by signal (128 + signal number)
+#
+# We exit with zellij's actual code so callers/scripts can react, but we
+# never let a *signal* propagate (that's what the traps above handle).
+
+if (( rc == 0 )); then
+    exit 0
+fi
+
+warn "zellij exited with code $rc"
+
+if (( rc > 128 )); then
+    sig=$(( rc - 128 ))
+    warn "zellij was killed by signal $sig ($(kill -l "$sig" 2>/dev/null || echo "unknown"))"
+fi
+
+# Hint toward the zellij log file, which contains crash diagnostics.
+log_dir="/tmp/zellij-$(id -u)/zellij-log"
+if [[ -d "$log_dir" ]]; then
+    warn "check the zellij log for details: $log_dir/zellij.log"
+fi
+
+exit "$rc"
